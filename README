@@ -1,7 +1,7 @@
 GNU/Hex
 =====
 this system has flexible configuration of both packages, file systems, and the kernel itself.
-you will essentially write the code for this system yourself, customizing it the way you need.
+it made for direct computer's components access.
 the project is inspired by the GNU ideology and is promoted on C and NASM x86-16.
 
 source at src/

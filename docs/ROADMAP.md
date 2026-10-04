@@ -29,7 +29,8 @@
 - `.gitignore`
 - `make deps`, `make help`, `make debug`, `make run-nographic`
 - Screenshots
-- Removal of leftover hacks (halt-on-exit, prompt on same line, clear via newlines)
+- Removal of leftover hacks (halt-on-exit, prompt on same line,
+  clear via newlines)
 
 ### v1.9 — HexFS versioning
 File system bumps to v7. Every overwrite creates a new version.
@@ -55,25 +56,20 @@ Old versions are kept and can be restored.
 
 ## In progress
 
-### v1.10 — `sys_brk` and real userspace malloc
-Replace the static 64 KiB bump allocator in `lib/malloc.c` with a proper
-allocator backed by a per-program break.
+### v1.10 — Userspace memory
+Real memory allocation for user programs, plus filesystem hygiene.
 
-- Per-process `brk` stored in syscall state, saved/restored on spawn
+- Per-process `brk`, stored in syscall state, saved/restored on spawn
 - Syscall #20 `brk(new)` — returns current break
 - `lib/start.c` initializes the break from the ELF load end
-- `lib/malloc.c` — linked-list allocator with `free` support
-- Tests: allocate/free in a loop, verify memory accounting via `mem`
-
-## Planned
-
-### v1.11 — HexFS garbage collection
-Versions accumulate forever. Add cleanup.
-
-- `hexfs_gc(ino, keep_n)` — keep last N versions, drop older
+- `lib/malloc.c` — replace the static 64 KiB bump allocator with a
+  proper linked-list allocator, `free` supported
+- `hexfs_gc(ino, keep_n)` — keep last N versions, drop older ones
 - Syscall #21 `hexgc`
 - User command `gc PATH N`
-- `diskinfo` shows used version-table blocks
+- `diskinfo` reports used version-table blocks
+
+## Planned
 
 ### v2.0 — HSL (Hex Shell Language)
 An object shell, not a bash clone. Replaces `/bin/sh` eventually.
@@ -90,17 +86,22 @@ for f in files { cp $f /backup/ }
 - `{ ... }` lambdas
 - `for x in ... {}` control flow
 - Builtin types: `File`, `Dir`, `Process`, `Task`
-- Interpreter in `user/hsl.c`, linked with a parser (recursive descent)
+- Interpreter in `user/hsl.c` — lexer, recursive-descent parser,
+  evaluator, environment
+- Requires v1.10 (`malloc` for AST and object trees)
 
 ### v2.1 — hexlog
-Structured event log.
+Structured event log. Developer-friendly tracing.
 
 - Ring buffer of syscalls, IRQs, task switches
 - `hexlog last 100`
 - `hexlog sc filter=write`
 - `hexlog dump /var/log/hexlog.bin`
+- Per-process syscall trace (like `strace`)
 
 ### v2.2 — Recovery boot menu
+Boot into a safe/recovery mode.
+
 - Safe mode (no drivers, no FS)
 - `fsck` for HexFS
 - Snapshot restore
@@ -110,7 +111,7 @@ Structured event log.
 ## Long-term
 
 ### v3.0 — Real processes
-- Per-process PML4
+- Per-process PML4 (separate address spaces)
 - `sys_fork`, `sys_exec`, `sys_wait`
 - `sys_getpid`, `sys_getppid`
 - `sys_mmap`

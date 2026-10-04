@@ -23,29 +23,60 @@
 - Nested spawn (depth 4)
 - Kernel task scheduler (cooperative + preemptive via PIT)
 
-## In progress
-
 ### v1.8 — GitHub release
 - README, ARCHITECTURE, ROADMAP
 - GPL-3.0 license
 - `.gitignore`
-- `make deps`, `make help`, `make debug`
+- `make deps`, `make help`, `make debug`, `make run-nographic`
 - Screenshots
-- Remove leftover hacks
+- Removal of leftover hacks (halt-on-exit, prompt on same line, clear via newlines)
+
+### v1.9 — HexFS versioning
+File system bumps to v7. Every overwrite creates a new version.
+Old versions are kept and can be restored.
+
+- Inode field `versions_lba` — pointer to a version chain on disk
+- Version table: LBA 267–778, one block per version, up to 511 versions
+- `hexfs_write` snapshots the current content before overwrite
+- New API: `hexfs_count_versions`, `hexfs_list_versions`,
+  `hexfs_read_version`, `hexfs_version_stat`
+- Syscalls:
+  - #16 `clear`
+  - #17 `write_file`
+  - #18 `hexlog` — list versions of a file
+  - #19 `hexcheckout` — restore a specific version
+- User shell:
+  - `write PATH TEXT`
+  - `history PATH`
+  - `checkout PATH VER`
+  - `clear` (real screen clear via syscall)
+  - Line editor with history (up/down), cursor (left/right, home/end),
+    delete, Ctrl+C, Ctrl+L
+
+## In progress
+
+### v1.10 — `sys_brk` and real userspace malloc
+Replace the static 64 KiB bump allocator in `lib/malloc.c` with a proper
+allocator backed by a per-program break.
+
+- Per-process `brk` stored in syscall state, saved/restored on spawn
+- Syscall #20 `brk(new)` — returns current break
+- `lib/start.c` initializes the break from the ELF load end
+- `lib/malloc.c` — linked-list allocator with `free` support
+- Tests: allocate/free in a loop, verify memory accounting via `mem`
 
 ## Planned
 
-### v1.9 — HexFS versioning
-Each file keeps a chain of previous versions.
+### v1.11 — HexFS garbage collection
+Versions accumulate forever. Add cleanup.
 
-- New inode type `INODE_FILE_VERSIONED`
-- Inode points to a version chain on disk
-- `hexlog file.txt` — show history
-- `hexcheckout file.txt N` — revert to version N
-- Snapshot on overwrite, optional GC
+- `hexfs_gc(ino, keep_n)` — keep last N versions, drop older
+- Syscall #21 `hexgc`
+- User command `gc PATH N`
+- `diskinfo` shows used version-table blocks
 
 ### v2.0 — HSL (Hex Shell Language)
-An object shell, not a bash clone.
+An object shell, not a bash clone. Replaces `/bin/sh` eventually.
 
 ```hsl
 files = ls /bin | where { .size > 1024 } | sort by .mtime desc
@@ -59,6 +90,7 @@ for f in files { cp $f /backup/ }
 - `{ ... }` lambdas
 - `for x in ... {}` control flow
 - Builtin types: `File`, `Dir`, `Process`, `Task`
+- Interpreter in `user/hsl.c`, linked with a parser (recursive descent)
 
 ### v2.1 — hexlog
 Structured event log.
@@ -81,7 +113,7 @@ Structured event log.
 - Per-process PML4
 - `sys_fork`, `sys_exec`, `sys_wait`
 - `sys_getpid`, `sys_getppid`
-- `sys_brk`, `sys_mmap`
+- `sys_mmap`
 - `sys_signal`, `sys_kill`
 - Real PID 1 (`/bin/init`)
 

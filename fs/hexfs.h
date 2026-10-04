@@ -7,6 +7,9 @@
 typedef void (*hexfs_ls_cb)(uint32_t ino, const char* name,
                             uint32_t size, uint8_t type, void* user);
 
+typedef void (*hexfs_version_cb)(uint32_t version, uint32_t size,
+                                 uint32_t ctime, uint32_t mtime, void* user);
+
 typedef struct {
     uint32_t ino;
     uint32_t parent;
@@ -18,6 +21,7 @@ typedef struct {
     uint32_t ctime;
     uint32_t mtime;
     uint32_t atime;
+    uint32_t versions_lba;
 } hexfs_stat_t;
 
 int hexfs_mount(void);
@@ -52,6 +56,13 @@ int hexfs_write_at(uint32_t ino, uint32_t offset, const void* buf, uint32_t len)
 
 int hexfs_resolve(uint32_t cwd, const char* path, uint32_t* out_ino);
 int hexfs_get_path(uint32_t ino, char* buf, int max);
+
+/* versioning */
+int hexfs_count_versions(uint32_t ino);
+int hexfs_list_versions (uint32_t ino, hexfs_version_cb cb, void* user);
+int hexfs_read_version  (uint32_t ino, uint32_t version,
+                         void* buf, uint32_t max, uint32_t* out_read);
+int hexfs_version_stat(uint32_t ino, uint32_t version, uint32_t* out_size);
 
 #define HEXFS_ROOT       1
 #define HEXFS_TYPE_FILE  1

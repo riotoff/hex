@@ -99,6 +99,14 @@ int hex_format(void) {
     return (int)sys3(SYS_FORMAT, 0, 0, 0);
 }
 
+int hex_list_versions(const char* path, void* buf, size_t max) {
+    return (int)sys3(18, (long)path, (long)buf, (long)max);
+}
+
+int hex_checkout(const char* path, int version) {
+    return (int)sys3(19, (long)path, (long)version, 0);
+}
+
 int hex_clear(void) {
     return (int)sys3(16, 0, 0, 0);
 }

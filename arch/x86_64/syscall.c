@@ -152,33 +152,10 @@ static int sys_close(int fd) {
 
 static int sys_read_fd(int fd, void* buf, uint32_t count) {
     if (fd == 0) {
-        uint32_t got = 0;
-        char* p = (char*)buf;
-        while (got < count) {
-            char c = kbd_getchar();
-            
-	    if (c == '\t') continue;
-            
-	    if (c == 0x03) {
-                console_putchar('\n');
-                break;
-            }
-            if (c == '\b') {
-                if (got > 0) {
-                    got--;
-                    console_putchar('\b');
-                }
-                continue;
-            }
-            if (c == '\n') {
-                console_putchar('\n');
-                p[got++] = '\n';
-                break;
-            }
-            console_putchar(c);
-            p[got++] = c;
-        }
-        return (int)got;
+        if (count == 0) return 0;
+        char c = kbd_getchar();
+        ((char*)buf)[0] = c;
+        return 1;
     }
 
     if (fd < 3 || fd >= MAX_FDS) return -1;
@@ -470,6 +447,67 @@ static int sys_write_file(const char* path, const void* buf, uint32_t len) {
     return r < 0 ? r : (int)len;
 }
 
+typedef struct {
+    uint8_t* buf;
+    uint32_t max;
+    uint32_t pos;
+} ver_log_ctx_t;
+
+static void ver_log_cb(uint32_t version, uint32_t size,
+                       uint32_t ctime, uint32_t mtime, void* user) {
+    (void)ctime;
+    ver_log_ctx_t* ctx = (ver_log_ctx_t*)user;
+    if (ctx->pos + 12 > ctx->max) return;
+
+    uint32_t* p = (uint32_t*)(ctx->buf + ctx->pos);
+    p[0] = version;
+    p[1] = size;
+    p[2] = mtime;
+    ctx->pos += 12;
+}
+
+static int sys_log_versions(const char* path, void* buf, uint32_t max) {
+    if (!path || !*path || !buf) return -1;
+
+    uint32_t ino;
+    if (hexfs_resolve(sc_cwd, path, &ino) < 0) return -1;
+    if (hexfs_type(ino) != HEXFS_TYPE_FILE) return -1;
+
+    ver_log_ctx_t ctx = { (uint8_t*)buf, max, 0 };
+    if (hexfs_list_versions(ino, ver_log_cb, &ctx) < 0) return -1;
+    return (int)ctx.pos;
+}
+
+static int sys_checkout(const char* path, uint32_t version) {
+    if (!path || !*path) return -1;
+    if (version == 0) return -1;
+
+    uint32_t dir;
+    char name[32];
+    if (split_path_cwd(path, &dir, name) < 0) return -1;
+
+    uint32_t ino;
+    if (hexfs_lookup(dir, name, &ino, 0) < 0) return -1;
+    if (hexfs_type(ino) != HEXFS_TYPE_FILE) return -1;
+
+    uint32_t size = 0;
+    if (hexfs_version_stat(ino, version, &size) < 0) return -1;
+    if (size > HEXFS_MAX_FILE) return -1;
+
+    uint8_t* buf = (uint8_t*)kmalloc(size ? size : 1);
+    if (!buf) return -1;
+
+    uint32_t got = 0;
+    if (hexfs_read_version(ino, version, buf, size, &got) < 0) {
+        kfree(buf);
+        return -1;
+    }
+
+    int r = hexfs_write(dir, name, buf, got);
+    kfree(buf);
+    return r < 0 ? r : 0;
+}
+
 void syscall_dispatch(regs_t* r) {
     uint64_t num = r->rax;
     uint64_t a1  = r->rdi;
@@ -572,11 +610,18 @@ void syscall_dispatch(regs_t* r) {
         case 15:
             r->rax = (uint64_t)sys_format();
             break;
+        case 18:
+            r->rax = (uint64_t)sys_log_versions((const char*)a1,
+                                                (void*)a2,
+                                                (uint32_t)a3);
+            break;
+        case 19:
+            r->rax = (uint64_t)sys_checkout((const char*)a1, (uint32_t)a2);
+            break;
         case 16:
             console_clear();
             r->rax = 0;
             break;
-
         case 17:
             r->rax = (uint64_t)sys_write_file((const char*)a1,
                                               (const void*)a2,

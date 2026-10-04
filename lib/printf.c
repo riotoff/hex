@@ -54,8 +54,9 @@ int printf(const char* fmt, ...) {
 
         int zero_pad = 0;
         int width    = 0;
+        if (*p == '-') { p++; }   /* ignore left-align */
         if (*p == '0') { zero_pad = 1; p++; }
-        while (*p >= '0' && *p <= '9') {
+	while (*p >= '0' && *p <= '9') {
             width = width * 10 + (*p - '0');
             p++;
         }

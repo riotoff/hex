@@ -6,7 +6,7 @@
 #include "memory.h"
 
 #define HEXFS_MAGIC      0x31534648u
-#define HEXFS_VERSION    6
+#define HEXFS_VERSION    7
 
 #define BLOCK_SIZE       512
 #define BITS_PER_SECTOR  (BLOCK_SIZE * 8)
@@ -20,7 +20,10 @@
 #define INODE_SIZE          HEXFS_INODE_SIZE
 #define INODES_PER_BLK      HEXFS_INODES_PER_BLK
 #define INODE_TABLE_BLKS    (INODE_COUNT / INODES_PER_BLK)
-#define DATA_LBA            (INODE_TABLE_LBA + INODE_TABLE_BLKS)
+#define VER_BITMAP_LBA      267
+#define VER_RECORDS_LBA     268
+#define VER_RECORDS_MAX     511
+#define DATA_LBA            779
 
 #define ROOT_INODE       HEXFS_ROOT
 #define INODE_FREE       0
@@ -40,6 +43,8 @@
 #define INDIRECT_ENTRIES (BLOCK_SIZE / 4)
 #define MAX_FILE_BLOCKS  (DIRECT_COUNT + INDIRECT_ENTRIES + INDIRECT_ENTRIES * INDIRECT_ENTRIES)
 #define MAX_FILE_SIZE    (MAX_FILE_BLOCKS * BLOCK_SIZE)
+
+#define VER_MAGIC        0x48584556u  /* "VEXH" */
 
 typedef struct {
     uint32_t magic;
@@ -67,7 +72,8 @@ typedef struct {
     uint32_t ctime;
     uint32_t mtime;
     uint32_t atime;
-    uint8_t  reserved2[48];
+    uint32_t versions_lba;
+    uint8_t  reserved2[44];
 } hexfs_inode_t;
 
 typedef struct {
@@ -76,11 +82,23 @@ typedef struct {
     char     name[NAME_MAX];
 } hexfs_dirent_t;
 
+typedef struct {
+    uint32_t magic;
+    uint32_t version_num;
+    uint32_t size;
+    uint32_t ctime;
+    uint32_t mtime;
+    uint32_t next_lba;
+    uint32_t direct[TOTAL_DIRECT];
+    uint8_t  reserved[512 - 6 * 4 - TOTAL_DIRECT * 4];
+} hexfs_verrec_t;
+
 static hexfs_super_t sb;
 static uint8_t       sector_buf[BLOCK_SIZE];
 static int           mounted = 0;
 
 static uint32_t alloc_data_block(void);
+static int inode_write(uint32_t idx, const hexfs_inode_t* in);
 
 static int str_len(const char* s) {
     int n = 0;
@@ -133,6 +151,91 @@ static int bitmap_set(uint32_t base_lba, uint32_t idx, int val) {
     else     sector_buf[off / 8] &= (uint8_t)~(1u << (off % 8));
     return write_block(lba);
 }
+
+/* ---------- version bitmap and records ---------- */
+
+static int ver_bitmap_test(uint32_t idx) {
+    uint32_t lba = VER_BITMAP_LBA + idx / BITS_PER_SECTOR;
+    uint32_t off = idx % BITS_PER_SECTOR;
+    if (read_block(lba) < 0) return -1;
+    return (sector_buf[off / 8] >> (off % 8)) & 1;
+}
+
+static int ver_bitmap_set(uint32_t idx, int val) {
+    uint32_t lba = VER_BITMAP_LBA + idx / BITS_PER_SECTOR;
+    uint32_t off = idx % BITS_PER_SECTOR;
+    if (read_block(lba) < 0) return -1;
+    if (val) sector_buf[off / 8] |=  (uint8_t)(1u << (off % 8));
+    else     sector_buf[off / 8] &= (uint8_t)~(1u << (off % 8));
+    return write_block(lba);
+}
+
+static uint32_t ver_alloc_block(void) {
+    for (uint32_t i = 0; i < VER_RECORDS_MAX; i++) {
+        if (ver_bitmap_test(i) == 0) {
+            ver_bitmap_set(i, 1);
+            return VER_RECORDS_LBA + i;
+        }
+    }
+    return 0;
+}
+
+static void ver_free_block(uint32_t lba) {
+    if (lba < VER_RECORDS_LBA) return;
+    uint32_t idx = lba - VER_RECORDS_LBA;
+    if (idx >= VER_RECORDS_MAX) return;
+    ver_bitmap_set(idx, 0);
+}
+
+static int ver_record_read(uint32_t lba, hexfs_verrec_t* vr) {
+    uint8_t buf[BLOCK_SIZE];
+    if (ata_read_sector(lba, buf) < 0) return -1;
+    mem_copy(vr, buf, sizeof(hexfs_verrec_t));
+    if (vr->magic != VER_MAGIC) return -2;
+    return 0;
+}
+
+static int ver_record_write(uint32_t lba, const hexfs_verrec_t* vr) {
+    uint8_t buf[BLOCK_SIZE];
+    mem_zero(buf, BLOCK_SIZE);
+    mem_copy(buf, vr, sizeof(hexfs_verrec_t));
+    return ata_write_sector(lba, buf);
+}
+
+static int ver_record_append(uint32_t ino, hexfs_inode_t* in) {
+    uint32_t lba = ver_alloc_block();
+    if (lba == 0) return -1;
+
+    uint32_t version_num = 1;
+    if (in->versions_lba) {
+        hexfs_verrec_t head;
+        if (ver_record_read(in->versions_lba, &head) == 0) {
+            version_num = head.version_num + 1;
+        }
+    }
+
+    hexfs_verrec_t vr;
+    mem_zero(&vr, sizeof(vr));
+    vr.magic       = VER_MAGIC;
+    vr.version_num = version_num;
+    vr.size        = in->size;
+    vr.ctime       = in->ctime;
+    vr.mtime       = in->mtime;
+    vr.next_lba    = in->versions_lba;
+    for (int i = 0; i < TOTAL_DIRECT; i++) vr.direct[i] = in->direct[i];
+
+    if (ver_record_write(lba, &vr) < 0) {
+        ver_free_block(lba);
+        return -1;
+    }
+
+    in->versions_lba = lba;
+    if (inode_write(ino, in) < 0) return -1;
+
+    return 0;
+}
+
+/* ---------- inode and dirent ---------- */
 
 static int inode_read(uint32_t idx, hexfs_inode_t* out) {
     uint32_t lba = sb.inode_table_lba + idx / INODES_PER_BLK;
@@ -431,6 +534,22 @@ static int file_truncate(hexfs_inode_t* in, uint32_t blocks_needed) {
 
 static void inode_free_blocks(hexfs_inode_t* in) {
     file_truncate(in, 0);
+
+    uint32_t cur = in->versions_lba;
+    while (cur) {
+        hexfs_verrec_t vr;
+        if (ver_record_read(cur, &vr) < 0) break;
+        uint32_t next = vr.next_lba;
+
+        hexfs_inode_t tmp;
+        mem_zero(&tmp, sizeof(tmp));
+        for (int i = 0; i < TOTAL_DIRECT; i++) tmp.direct[i] = vr.direct[i];
+        file_truncate(&tmp, 0);
+
+        ver_free_block(cur);
+        cur = next;
+    }
+    in->versions_lba = 0;
 }
 
 static int dir_is_empty(uint32_t dir_inode) {
@@ -496,16 +615,17 @@ int hexfs_format(void) {
 
     hexfs_inode_t in;
     mem_zero(&in, sizeof(in));
-    in.type      = INODE_DIR;
-    in.size      = 0;
-    in.direct[0] = DATA_LBA;
-    in.parent    = ROOT_INODE;
-    in.mode      = HEXFS_DEF_DIR_MODE;
-    in.uid       = 0;
-    in.gid       = 0;
-    in.ctime     = now;
-    in.mtime     = now;
-    in.atime     = now;
+    in.type         = INODE_DIR;
+    in.size         = 0;
+    in.direct[0]    = DATA_LBA;
+    in.parent       = ROOT_INODE;
+    in.mode         = HEXFS_DEF_DIR_MODE;
+    in.uid          = 0;
+    in.gid          = 0;
+    in.ctime        = now;
+    in.mtime        = now;
+    in.atime        = now;
+    in.versions_lba = 0;
     if (inode_write(ROOT_INODE, &in) < 0) return -1;
 
     return 0;
@@ -616,6 +736,7 @@ static int create_node(uint32_t dir_inode, const char* name, uint8_t type) {
     in.ctime  = now;
     in.mtime  = now;
     in.atime  = now;
+    in.versions_lba = 0;
 
     if (type == INODE_DIR) {
         uint32_t blk = alloc_data_block();
@@ -656,17 +777,18 @@ int hexfs_stat(uint32_t ino, hexfs_stat_t* out) {
     hexfs_inode_t in;
     if (inode_read(ino, &in) < 0) return -1;
 
-    out->ino    = ino;
-    out->parent = in.parent;
-    out->type   = (in.type == INODE_DIR)  ? HEXFS_TYPE_DIR :
-                  (in.type == INODE_FILE) ? HEXFS_TYPE_FILE : 0;
-    out->size   = in.size;
-    out->mode   = in.mode;
-    out->uid    = in.uid;
-    out->gid    = in.gid;
-    out->ctime  = in.ctime;
-    out->mtime  = in.mtime;
-    out->atime  = in.atime;
+    out->ino          = ino;
+    out->parent       = in.parent;
+    out->type         = (in.type == INODE_DIR)  ? HEXFS_TYPE_DIR :
+                        (in.type == INODE_FILE) ? HEXFS_TYPE_FILE : 0;
+    out->size         = in.size;
+    out->mode         = in.mode;
+    out->uid          = in.uid;
+    out->gid          = in.gid;
+    out->ctime        = in.ctime;
+    out->mtime        = in.mtime;
+    out->atime        = in.atime;
+    out->versions_lba = in.versions_lba;
     return 0;
 }
 
@@ -892,7 +1014,7 @@ int hexfs_copy(uint32_t src_dir, const char* src_name,
     r = hexfs_write(dst_dir, dst_name, copy_buf, in.size);
     kfree(copy_buf);
     if (r < 0) return r;
-    
+
     uint32_t dst_ino;
     if (hexfs_lookup(dst_dir, dst_name, &dst_ino, 0) == 0) {
         hexfs_inode_t dst_in;
@@ -917,9 +1039,17 @@ int hexfs_write(uint32_t dir_inode, const char* name, const void* buf, size_t le
     hexfs_inode_t in;
     if (inode_read(ino, &in) < 0) return -4;
 
-    uint32_t blocks_needed = (uint32_t)((len + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    /* snapshot current content as a version, if any */
+    if (in.size > 0) {
+        if (ver_record_append(ino, &in) < 0) return -11;
+    }
 
-    if (file_truncate(&in, blocks_needed) < 0) return -6;
+    /* drop direct[] references — we will allocate fresh blocks.
+       old blocks are NOT freed; they are referenced by the version
+       record we just created, or were already unused. */
+    for (int i = 0; i < TOTAL_DIRECT; i++) in.direct[i] = 0;
+
+    uint32_t blocks_needed = (uint32_t)((len + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
     for (uint32_t i = 0; i < blocks_needed; i++) {
         if ((i & 0xF) == 0 && kbd_check_break()) return HEXFS_ERR_INTERRUPTED;
@@ -962,6 +1092,11 @@ int hexfs_append(uint32_t dir_inode, const char* name, const void* buf, size_t l
     size_t new_size = old_size + len;
 
     if (new_size > MAX_FILE_SIZE) return -2;
+
+    /* snapshot current content before modifying */
+    if (in.size > 0) {
+        if (ver_record_append(ino, &in) < 0) return -11;
+    }
 
     uint32_t start_block  = (uint32_t)(old_size / BLOCK_SIZE);
     uint32_t total_blocks = (uint32_t)((new_size + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -1201,4 +1336,100 @@ int hexfs_write_at(uint32_t ino, uint32_t offset, const void* buf, uint32_t len)
     if (inode_write(ino, &in) < 0) return -1;
 
     return 0;
+}
+
+/* ---------- versioning public API ---------- */
+
+int hexfs_list_versions(uint32_t ino, hexfs_version_cb cb, void* user) {
+    if (!mounted || !cb) return -1;
+    hexfs_inode_t in;
+    if (inode_read(ino, &in) < 0) return -1;
+    if (in.versions_lba == 0) return 0;
+
+    uint32_t cur = in.versions_lba;
+    while (cur) {
+        hexfs_verrec_t vr;
+        if (ver_record_read(cur, &vr) < 0) return -1;
+        cb(vr.version_num, vr.size, vr.ctime, vr.mtime, user);
+        if (vr.next_lba == 0) break;
+        cur = vr.next_lba;
+    }
+    return 0;
+}
+
+typedef struct { uint32_t count; } ver_count_t;
+
+static void ver_count_cb(uint32_t v, uint32_t sz, uint32_t ct, uint32_t mt, void* u) {
+    (void)v; (void)sz; (void)ct; (void)mt;
+    ((ver_count_t*)u)->count++;
+}
+
+int hexfs_count_versions(uint32_t ino) {
+    ver_count_t c = { 0 };
+    if (hexfs_list_versions(ino, ver_count_cb, &c) < 0) return -1;
+    return (int)c.count;
+}
+
+int hexfs_read_version(uint32_t ino, uint32_t version,
+                       void* buf, uint32_t max, uint32_t* out_read) {
+    if (!mounted) return -1;
+
+    hexfs_inode_t in;
+    if (inode_read(ino, &in) < 0) return -1;
+    if (in.versions_lba == 0) return -2;
+
+    uint32_t cur = in.versions_lba;
+    while (cur) {
+        hexfs_verrec_t vr;
+        if (ver_record_read(cur, &vr) < 0) return -1;
+        if (vr.version_num == version) {
+            hexfs_inode_t tmp;
+            mem_zero(&tmp, sizeof(tmp));
+            tmp.type = INODE_FILE;
+            tmp.size = vr.size;
+            for (int k = 0; k < TOTAL_DIRECT; k++) tmp.direct[k] = vr.direct[k];
+
+            uint32_t to_read = vr.size;
+            if (to_read > max) to_read = max;
+
+            uint32_t done = 0;
+            for (uint32_t i = 0; i < MAX_FILE_BLOCKS && done < to_read; i++) {
+                uint32_t lba;
+                int r = file_data_block(&tmp, i, 0, &lba);
+                if (r <= 0) break;
+                if (ata_read_sector(lba, sector_buf) < 0) return -1;
+                uint32_t chunk = to_read - done;
+                if (chunk > BLOCK_SIZE) chunk = BLOCK_SIZE;
+                mem_copy((uint8_t*)buf + done, sector_buf, chunk);
+                done += chunk;
+            }
+
+            if (out_read) *out_read = done;
+            return 0;
+        }
+        if (vr.next_lba == 0) break;
+        cur = vr.next_lba;
+    }
+    return -2;
+}
+
+int hexfs_version_stat(uint32_t ino, uint32_t version, uint32_t* out_size) {
+    if (!mounted || !out_size) return -1;
+
+    hexfs_inode_t in;
+    if (inode_read(ino, &in) < 0) return -1;
+    if (in.versions_lba == 0) return -2;
+
+    uint32_t cur = in.versions_lba;
+    while (cur) {
+        hexfs_verrec_t vr;
+        if (ver_record_read(cur, &vr) < 0) return -1;
+        if (vr.version_num == version) {
+            *out_size = vr.size;
+            return 0;
+        }
+        if (vr.next_lba == 0) break;
+        cur = vr.next_lba;
+    }
+    return -2;
 }

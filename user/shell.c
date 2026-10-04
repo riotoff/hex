@@ -1,8 +1,164 @@
 #include <unistd.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <hexos.h>
+
+#define HIST_SIZE 16
+#define LINE_MAX  76
+
+#define KEY_UP    0x80
+#define KEY_DOWN  0x81
+#define KEY_LEFT  0x82
+#define KEY_RIGHT 0x83
+#define KEY_HOME  0x84
+#define KEY_END   0x85
+#define KEY_DEL   0x86
+#define KEY_PGUP  0x87
+#define KEY_PGDN  0x88
+
+static char history[HIST_SIZE][LINE_MAX + 1];
+static int  hist_count = 0;
+
+static void out_char(char c) {
+    write(1, &c, 1);
+}
+
+static void out_str(const char* s) {
+    write(1, s, strlen(s));
+}
+
+static void redraw(const char* buf, int len, int cursor) {
+    out_char('\r');
+    out_str("$ ");
+    for (int i = 0; i < len; i++) out_char(buf[i]);
+    for (int i = len; i < LINE_MAX; i++) out_char(' ');
+    out_char('\r');
+    out_str("$ ");
+    for (int i = 0; i < cursor; i++) out_char(buf[i]);
+}
+
+static int readline(char* buf, int max) {
+    int len = 0;
+    int cursor = 0;
+    int pos = hist_count;
+    char saved[LINE_MAX + 1];
+    saved[0] = 0;
+    int saved_valid = 0;
+
+    buf[0] = 0;
+    out_str("$ ");
+
+    for (;;) {
+        unsigned char c;
+        ssize_t n = read(0, &c, 1);
+        if (n <= 0) continue;
+
+        if (c == '\n' || c == '\r') {
+            buf[len] = 0;
+            out_char('\n');
+            return len;
+        }
+        if (c == 0x03) {           /* Ctrl+C */
+            out_str("^C\n");
+            return -1;
+        }
+        if (c == 0x0C) {           /* Ctrl+L */
+            hex_clear();
+            redraw(buf, len, cursor);
+            continue;
+        }
+        if (c == '\b' || c == 0x7F) {
+            if (cursor > 0) {
+                for (int i = cursor - 1; i < len - 1; i++) buf[i] = buf[i + 1];
+                len--;
+                cursor--;
+                redraw(buf, len, cursor);
+            }
+            continue;
+        }
+        if (c == KEY_UP) {
+            if (hist_count == 0) continue;
+            if (!saved_valid) {
+                for (int i = 0; i <= len; i++) saved[i] = buf[i];
+                saved_valid = 1;
+            }
+            if (pos == 0) continue;
+            pos--;
+            int hl = (int)strlen(history[pos]);
+            for (int i = 0; i < hl; i++) buf[i] = history[pos][i];
+            buf[hl] = 0;
+            len = hl;
+            cursor = len;
+            redraw(buf, len, cursor);
+            continue;
+        }
+        if (c == KEY_DOWN) {
+            if (pos >= hist_count) continue;
+            pos++;
+            int hl;
+            if (pos == hist_count) {
+                hl = (int)strlen(saved);
+                for (int i = 0; i < hl; i++) buf[i] = saved[i];
+            } else {
+                hl = (int)strlen(history[pos]);
+                for (int i = 0; i < hl; i++) buf[i] = history[pos][i];
+            }
+            buf[hl] = 0;
+            len = hl;
+            cursor = len;
+            redraw(buf, len, cursor);
+            continue;
+        }
+        if (c == KEY_LEFT) {
+            if (cursor > 0) { cursor--; redraw(buf, len, cursor); }
+            continue;
+        }
+        if (c == KEY_RIGHT) {
+            if (cursor < len) { cursor++; redraw(buf, len, cursor); }
+            continue;
+        }
+        if (c == KEY_HOME) {
+            cursor = 0;
+            redraw(buf, len, cursor);
+            continue;
+        }
+        if (c == KEY_END) {
+            cursor = len;
+            redraw(buf, len, cursor);
+            continue;
+        }
+        if (c == KEY_DEL) {
+            if (cursor < len) {
+                for (int i = cursor; i < len - 1; i++) buf[i] = buf[i + 1];
+                len--;
+                redraw(buf, len, cursor);
+            }
+            continue;
+        }
+        if (c >= ' ' && c < 0x7F && len < max - 1) {
+            for (int i = len; i > cursor; i--) buf[i] = buf[i - 1];
+            buf[cursor] = (char)c;
+            len++;
+            cursor++;
+            redraw(buf, len, cursor);
+        }
+    }
+}
+
+static void hist_push(const char* s) {
+    if (s[0] == 0) return;
+    if (hist_count > 0 && strcmp(history[hist_count - 1], s) == 0) return;
+    if (hist_count < HIST_SIZE) {
+        strcpy(history[hist_count], s);
+        hist_count++;
+    } else {
+        for (int h = 0; h < HIST_SIZE - 1; h++)
+            strcpy(history[h], history[h + 1]);
+        strcpy(history[HIST_SIZE - 1], s);
+    }
+}
 
 static void cmd_clear(void) {
     hex_clear();
@@ -65,6 +221,44 @@ static void cmd_write(const char* args) {
     else       puts("ok");
 }
 
+static void cmd_history(const char* path) {
+    if (!path || !*path) { puts("usage: history PATH"); return; }
+
+    unsigned char buf[2048];
+    int n = hex_list_versions(path, buf, sizeof(buf));
+    if (n < 0) { puts("history: cannot list"); return; }
+    if (n == 0) { puts("no versions"); return; }
+
+    puts("ver  size");
+    int i = 0;
+    while (i + 12 <= n) {
+        unsigned int ver  = *(unsigned int*)(buf + i);
+        unsigned int size = *(unsigned int*)(buf + i + 4);
+        printf("  v%u  %u\n", ver, size);
+        i += 12;
+    }
+}
+
+static void cmd_checkout(const char* args) {
+    if (!args || !*args) { puts("usage: checkout PATH VER"); return; }
+
+    const char* p = args;
+    while (*p && *p != ' ') p++;
+    if (*p == 0) { puts("usage: checkout PATH VER"); return; }
+
+    char path[128];
+    size_t plen = (size_t)(p - args);
+    if (plen >= sizeof(path)) plen = sizeof(path) - 1;
+    for (size_t i = 0; i < plen; i++) path[i] = args[i];
+    path[plen] = 0;
+
+    int ver = atoi(p + 1);
+    if (ver <= 0) { puts("checkout: bad version"); return; }
+
+    if (hex_checkout(path, ver) < 0) puts("checkout: failed");
+    else puts("ok");
+}
+
 static void cmd_mkdir(const char* path) {
     if (!path || !*path) { puts("usage: mkdir PATH"); return; }
     if (mkdir(path, 0755) == 0) puts("ok");
@@ -121,6 +315,8 @@ static void help(void) {
     puts("  cd PATH        - change directory");
     puts("  cat PATH       - print file contents");
     puts("  write P TEXT   - create/overwrite file");
+    puts("  history PATH   - show file version history");
+    puts("  checkout P VER - revert file to version VER");
     puts("  mkdir PATH     - create directory");
     puts("  rm PATH        - remove file or empty dir");
     puts("  run PATH       - spawn program, wait for exit");
@@ -135,19 +331,17 @@ static const char* skip_ws_(const char* s) {
 }
 
 int main(void) {
-    puts("Hex user shell v0.6");
+    puts("Hex user shell v0.7");
     puts("type 'help' for commands");
 
-    static char line[256];
+    static char line[LINE_MAX + 1];
 
     for (;;) {
-        write(1, "$ ", 2);
-        ssize_t n = read(0, line, sizeof(line) - 1);
-        if (n <= 0) continue;
-        line[n] = 0;
+        int len = readline(line, LINE_MAX);
+        if (len < 0) continue;    /* Ctrl+C */
+        if (len == 0) continue;
 
-        if (n > 0 && line[n - 1] == '\n') line[n - 1] = 0;
-        if (n > 1 && line[n - 2] == '\r') line[n - 2] = 0;
+        hist_push(line);
 
         const char* cmd = skip_ws_(line);
         if (*cmd == 0) continue;
@@ -158,6 +352,14 @@ int main(void) {
             help();
         } else if (strcmp(cmd, "clear") == 0) {
             cmd_clear();
+        } else if (strcmp(cmd, "history") == 0) {
+            puts("usage: history PATH");
+        } else if (strncmp(cmd, "history ", 8) == 0) {
+            cmd_history(skip_ws_(cmd + 8));
+        } else if (strcmp(cmd, "checkout") == 0) {
+            puts("usage: checkout PATH VER");
+        } else if (strncmp(cmd, "checkout ", 9) == 0) {
+            cmd_checkout(skip_ws_(cmd + 9));
         } else if (strcmp(cmd, "ls") == 0) {
             cmd_ls(".");
         } else if (strncmp(cmd, "ls ", 3) == 0) {

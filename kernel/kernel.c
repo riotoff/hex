@@ -297,6 +297,20 @@ static void ls_cb(uint32_t ino, const char* name,
     }
 }
 
+static void ver_print_cb(uint32_t version, uint32_t size,
+                         uint32_t ctime, uint32_t mtime, void* user) {
+    (void)ctime; (void)user;
+    char tbuf[24];
+    format_time_short(mtime, tbuf);
+    print("  v");
+    print_uint(version);
+    print("  ");
+    print_pad_uint(size, 9);
+    print("  ");
+    print(tbuf);
+    putchar('\n');
+}
+
 static void copy_str(char* dst, const char* src, int* out_len) {
     int i = 0;
     while (src[i] && i < LINE_MAX) { dst[i] = src[i]; i++; }
@@ -697,6 +711,8 @@ static void cmd_inode(const char* args) {
                      ((uint32_t)p[74] << 16) | ((uint32_t)p[75] << 24);
     uint32_t atime = (uint32_t)p[76] | ((uint32_t)p[77] << 8) |
                      ((uint32_t)p[78] << 16) | ((uint32_t)p[79] << 24);
+    uint32_t v_lba = (uint32_t)p[80] | ((uint32_t)p[81] << 8) |
+                     ((uint32_t)p[82] << 16) | ((uint32_t)p[83] << 24);
     char mbuf[16], tbuf[24];
     format_mode(type == 2 ? HEXFS_TYPE_DIR :
                 type == 1 ? HEXFS_TYPE_FILE : 0, mode, mbuf);
@@ -711,6 +727,7 @@ static void cmd_inode(const char* args) {
     print(")\n");
     print("  uid:    "); print_uint(uid); putchar('\n');
     print("  gid:    "); print_uint(gid); putchar('\n');
+    print("  ver:    "); print_uint(v_lba); putchar('\n');
     format_time_long(ctime, tbuf); print("  ctime:  "); print(tbuf); putchar('\n');
     format_time_long(mtime, tbuf); print("  mtime:  "); print(tbuf); putchar('\n');
     format_time_long(atime, tbuf); print("  atime:  "); print(tbuf); putchar('\n');
@@ -1423,9 +1440,31 @@ static void cmd_stat(const char* path) {
     print("   Gid: "); print_uint(st.gid); putchar('\n');
     print(" Inode: "); print_uint(st.ino); putchar('\n');
     print("Parent: "); print_uint(st.parent); putchar('\n');
+    print("   Ver: "); print_uint(st.versions_lba); putchar('\n');
     format_time_long(st.atime, tbuf); print("Access: "); print(tbuf); putchar('\n');
     format_time_long(st.mtime, tbuf); print("Modify: "); print(tbuf); putchar('\n');
     format_time_long(st.ctime, tbuf); print("Change: "); print(tbuf); putchar('\n');
+}
+
+static void cmd_versions(const char* args) {
+    const char* p = skip_ws(args);
+    if (!*p) { print("Usage: versions PATH\n"); return; }
+    uint32_t ino;
+    if (hexfs_resolve(cwd_ino, p, &ino) < 0) {
+        print("no such file\n");
+        return;
+    }
+    if (hexfs_type(ino) != HEXFS_TYPE_FILE) {
+        print("not a regular file\n");
+        return;
+    }
+    int n = hexfs_count_versions(ino);
+    if (n < 0) { print("error\n"); return; }
+    print("versions: "); print_uint((uint64_t)n); putchar('\n');
+    if (n > 0) {
+        print("ver  size       mtime\n");
+        hexfs_list_versions(ino, ver_print_cb, 0);
+    }
 }
 
 static void cmd_chmod(const char* args) {
@@ -1540,7 +1579,7 @@ static void exec(const char* buf, int len) {
     if (len == 0) return;
 
     if (streq(buf, "hex")) {
-        print("Hex OS v1.7.0\n");
+        print("Hex OS v1.6.9\n");
     } else if (streq(buf, "clear")) {
         console_clear();
     } else if (streq(buf, "help")) {
@@ -1591,6 +1630,7 @@ static void exec(const char* buf, int len) {
         print("  mv SRC DST      - move/rename\n");
         print("  cp SRC DST      - copy file\n");
         print("  stat PATH       - show inode metadata\n");
+        print("  versions PATH   - list file versions\n");
         print("  chmod MODE PATH - change mode (octal)\n");
         print("  chown UID GID P - change owner\n");
         print("\nEditing:\n");
@@ -1787,6 +1827,10 @@ static void exec(const char* buf, int len) {
         print("Usage: stat PATH\n");
     } else if (starts_with(buf, "stat ")) {
         cmd_stat(skip_ws(buf + 5));
+    } else if (streq(buf, "versions")) {
+        print("Usage: versions PATH\n");
+    } else if (starts_with(buf, "versions ")) {
+        cmd_versions(skip_ws(buf + 9));
     } else if (streq(buf, "chmod")) {
         print("Usage: chmod MODE PATH\n");
     } else if (starts_with(buf, "chmod ")) {
@@ -1951,7 +1995,7 @@ void kernel_main(void) {
     }
 
     console_clear();
-    print("Hex OS v1.7.0\n");
+    print("Hex OS v1.6.9\n");
     print("Type 'help' for commands.\n\n");
     shell();
 }

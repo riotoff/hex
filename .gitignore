@@ -1,0 +1,38 @@
+# build artifacts
+*.o
+*.elf
+*.bin
+*.img
+*.a
+*.map
+kernel.elf
+kernel.bin
+kernel.map
+os.img
+boot.bin
+boot_bin.o
+lib/libhexc.a
+user/*.elf
+
+# per-directory
+arch/x86_64/*.o
+drivers/*.o
+kernel/*.o
+fs/*.o
+lib/*.o
+user/*.o
+
+# editors
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# debug
+log.txt
+*.log
+*.ppm
+
+# keep png in docs
+!docs/screenshots/*.png

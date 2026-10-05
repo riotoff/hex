@@ -1338,6 +1338,13 @@ int hexfs_write_at(uint32_t ino, uint32_t offset, const void* buf, uint32_t len)
     return 0;
 }
 
+static void ver_free_data(const hexfs_verrec_t* vr) {
+    hexfs_inode_t tmp;
+    mem_zero(&tmp, sizeof(tmp));
+    for (int k = 0; k < TOTAL_DIRECT; k++) tmp.direct[k] = vr->direct[k];
+    file_truncate(&tmp, 0);
+}
+
 /* ---------- versioning public API ---------- */
 
 int hexfs_list_versions(uint32_t ino, hexfs_version_cb cb, void* user) {
@@ -1432,4 +1439,66 @@ int hexfs_version_stat(uint32_t ino, uint32_t version, uint32_t* out_size) {
         cur = vr.next_lba;
     }
     return -2;
+}
+
+int hexfs_gc(uint32_t ino, uint32_t keep_n) {
+    if (!mounted) return -1;
+
+    hexfs_inode_t in;
+    if (inode_read(ino, &in) < 0) return -1;
+    if (in.type != INODE_FILE) return -1;
+    if (in.versions_lba == 0) return 0;
+
+    if (keep_n == 0) {
+        uint32_t cur = in.versions_lba;
+        while (cur) {
+            hexfs_verrec_t vr;
+            if (ver_record_read(cur, &vr) < 0) break;
+            uint32_t next = vr.next_lba;
+            ver_free_data(&vr);
+            ver_free_block(cur);
+            cur = next;
+        }
+        in.versions_lba = 0;
+        return inode_write(ino, &in);
+    }
+
+    uint32_t cur = in.versions_lba;
+    for (uint32_t i = 1; i < keep_n; i++) {
+        hexfs_verrec_t vr;
+        if (ver_record_read(cur, &vr) < 0) return -1;
+        if (vr.next_lba == 0) return 0;
+        cur = vr.next_lba;
+    }
+
+    hexfs_verrec_t vr;
+    if (ver_record_read(cur, &vr) < 0) return -1;
+    uint32_t tail = vr.next_lba;
+    if (tail == 0) return 0;
+
+    vr.next_lba = 0;
+    if (ver_record_write(cur, &vr) < 0) return -1;
+
+    while (tail) {
+        hexfs_verrec_t tvr;
+        if (ver_record_read(tail, &tvr) < 0) break;
+        uint32_t next = tvr.next_lba;
+        ver_free_data(&tvr);
+        ver_free_block(tail);
+        tail = next;
+    }
+
+    return 0;
+}
+
+uint32_t hexfs_version_blocks_used(void) {
+    if (!mounted) return 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < VER_RECORDS_MAX; i++)
+        if (ver_bitmap_test(i) == 1) n++;
+    return n;
+}
+
+uint32_t hexfs_version_blocks_total(void) {
+    return VER_RECORDS_MAX;
 }

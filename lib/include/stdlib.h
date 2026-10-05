@@ -3,6 +3,9 @@
 
 #include <stddef.h>
 
+void* sbrk(long incr);
+void  __heap_init(void);
+
 void* malloc(size_t n);
 void  free  (void* p);
 

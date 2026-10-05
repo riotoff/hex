@@ -60,11 +60,11 @@ static int readline(char* buf, int max) {
             out_char('\n');
             return len;
         }
-        if (c == 0x03) {           /* Ctrl+C */
+        if (c == 0x03) {
             out_str("^C\n");
             return -1;
         }
-        if (c == 0x0C) {           /* Ctrl+L */
+        if (c == 0x0C) {
             hex_clear();
             redraw(buf, len, cursor);
             continue;
@@ -164,6 +164,20 @@ static void cmd_clear(void) {
     hex_clear();
 }
 
+static void cmd_mtest(void) {
+    void* arr[16];
+    for (int i = 0; i < 16; i++) {
+        arr[i] = malloc(1000);
+        if (!arr[i]) { printf("malloc %d failed\n", i); return; }
+    }
+    for (int i = 0; i < 16; i += 2) free(arr[i]);
+    for (int i = 0; i < 8; i++) {
+        void* p = malloc(1000);
+        if (!p) { printf("re-malloc %d failed\n", i); return; }
+    }
+    puts("malloc test ok");
+}
+
 static void cmd_ls(const char* path) {
     const char* target = (path && *path) ? path : ".";
     char buf[2048];
@@ -259,6 +273,26 @@ static void cmd_checkout(const char* args) {
     else puts("ok");
 }
 
+static void cmd_gc(const char* args) {
+    if (!args || !*args) { puts("usage: gc PATH N"); return; }
+
+    const char* p = args;
+    while (*p && *p != ' ') p++;
+    if (*p == 0) { puts("usage: gc PATH N"); return; }
+
+    char path[128];
+    size_t plen = (size_t)(p - args);
+    if (plen >= sizeof(path)) plen = sizeof(path) - 1;
+    for (size_t i = 0; i < plen; i++) path[i] = args[i];
+    path[plen] = 0;
+
+    int n = atoi(p + 1);
+    if (n < 0) { puts("gc: bad count"); return; }
+
+    if (hex_gc(path, n) < 0) puts("gc: failed");
+    else                     puts("ok");
+}
+
 static void cmd_mkdir(const char* path) {
     if (!path || !*path) { puts("usage: mkdir PATH"); return; }
     if (mkdir(path, 0755) == 0) puts("ok");
@@ -311,11 +345,13 @@ static void help(void) {
     puts("  help           - this message");
     puts("  clear          - clear screen");
     puts("  echo TEXT      - print TEXT");
+    puts("  mtest          - malloc/free stress test");
     puts("  ls [PATH]      - list directory");
     puts("  cd PATH        - change directory");
     puts("  cat PATH       - print file contents");
     puts("  write P TEXT   - create/overwrite file");
     puts("  history PATH   - show file version history");
+    puts("  gc PATH N      - keep last N versions, drop older");
     puts("  checkout P VER - revert file to version VER");
     puts("  mkdir PATH     - create directory");
     puts("  rm PATH        - remove file or empty dir");
@@ -331,14 +367,14 @@ static const char* skip_ws_(const char* s) {
 }
 
 int main(void) {
-    puts("Hex user shell v0.7");
+    puts("Hex user shell v0.8");
     puts("type 'help' for commands");
 
     static char line[LINE_MAX + 1];
 
     for (;;) {
         int len = readline(line, LINE_MAX);
-        if (len < 0) continue;    /* Ctrl+C */
+        if (len < 0) continue;
         if (len == 0) continue;
 
         hist_push(line);
@@ -346,12 +382,18 @@ int main(void) {
         const char* cmd = skip_ws_(line);
         if (*cmd == 0) continue;
 
-        if (strcmp(cmd, "exit") == 0) {
+        if (strcmp(cmd, "gc") == 0) {
+            puts("usage: gc PATH N");
+        } else if (strncmp(cmd, "gc ", 3) == 0) {
+            cmd_gc(skip_ws_(cmd + 3));
+        } else if (strcmp(cmd, "exit") == 0) {
             return 0;
         } else if (strcmp(cmd, "help") == 0) {
             help();
         } else if (strcmp(cmd, "clear") == 0) {
             cmd_clear();
+        } else if (strcmp(cmd, "mtest") == 0) {
+            cmd_mtest();
         } else if (strcmp(cmd, "history") == 0) {
             puts("usage: history PATH");
         } else if (strncmp(cmd, "history ", 8) == 0) {

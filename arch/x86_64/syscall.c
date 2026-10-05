@@ -37,9 +37,14 @@ static int        spawn_depth = 0;
 static regs_t     spawn_parent_regs[SPAWN_MAX_DEPTH];
 static uint32_t   spawn_parent_cwd [SPAWN_MAX_DEPTH];
 static fd_entry_t spawn_parent_fds [SPAWN_MAX_DEPTH][MAX_FDS];
+static uint64_t   spawn_parent_brk    [SPAWN_MAX_DEPTH];
+static uint64_t   spawn_parent_minbrk [SPAWN_MAX_DEPTH];
 
-static uint8_t spawn_save_mem[SPAWN_MAX_DEPTH][SPAWN_IMAGE_SIZE] __attribute__((aligned(16)));
-static uint8_t spawn_stack_mem[SPAWN_STACK_SIZE] __attribute__((aligned(16)));
+static uint64_t   current_brk = 0;
+static uint64_t   min_brk     = 0;
+
+static uint8_t spawn_save_mem  [SPAWN_MAX_DEPTH][SPAWN_IMAGE_SIZE] __attribute__((aligned(16)));
+static uint8_t spawn_stack_mem [SPAWN_MAX_DEPTH][SPAWN_STACK_SIZE] __attribute__((aligned(16)));
 
 static void serial_u64(uint64_t v) {
     char b[21];
@@ -69,6 +74,13 @@ void syscall_reset_fds(void) {
     }
     sc_cwd = HEXFS_ROOT;
     spawn_depth = 0;
+    current_brk = 0;
+    min_brk     = 0;
+}
+
+void syscall_set_brk(uint64_t new_brk) {
+    current_brk = new_brk;
+    min_brk     = new_brk;
 }
 
 static int alloc_fd(void) {
@@ -279,6 +291,39 @@ static int sys_format(void) {
     return 0;
 }
 
+static int sys_write_file(const char* path, const void* buf, uint32_t len) {
+    if (!path || !*path) return -1;
+
+    uint32_t dir;
+    char name[32];
+    if (split_path_cwd(path, &dir, name) < 0) return -1;
+
+    uint32_t ino;
+    uint8_t  type;
+    int exists = (hexfs_lookup(dir, name, &ino, &type) == 0);
+
+    if (exists) {
+        if (type != HEXFS_TYPE_FILE) return -1;
+        int r = hexfs_write(dir, name, buf, len);
+        return r < 0 ? r : (int)len;
+    }
+
+    int r = hexfs_create(dir, name);
+    if (r < 0) return r;
+    r = hexfs_write(dir, name, buf, len);
+    return r < 0 ? r : (int)len;
+}
+
+static uint64_t sys_brk(uint64_t new_brk) {
+    if (new_brk == 0) return current_brk;
+
+    if (new_brk < min_brk)        return (uint64_t)-1;
+    if (new_brk >= 0x40000000ULL) return (uint64_t)-1;
+
+    current_brk = new_brk;
+    return current_brk;
+}
+
 static void spawn_restore_parent(regs_t* r, uint64_t code) {
     kbd_flush();
 
@@ -291,7 +336,9 @@ static void spawn_restore_parent(regs_t* r, uint64_t code) {
 
     for (int i = 0; i < MAX_FDS; i++)
         fd_table[i] = spawn_parent_fds[d][i];
-    sc_cwd = spawn_parent_cwd[d];
+    sc_cwd      = spawn_parent_cwd[d];
+    current_brk = spawn_parent_brk   [d];
+    min_brk     = spawn_parent_minbrk[d];
 
     regs_t saved = spawn_parent_regs[d];
     saved.rax = code;
@@ -335,6 +382,9 @@ static int sys_spawn(regs_t* r, const char* path) {
     for (int i = 0; i < MAX_FDS; i++)
         spawn_parent_fds[d][i] = fd_table[i];
 
+    spawn_parent_brk   [d] = current_brk;
+    spawn_parent_minbrk[d] = min_brk;
+
     elf_info_t info;
     int er = elf_load(elf, got, &info);
     if (er < 0) {
@@ -345,8 +395,11 @@ static int sys_spawn(regs_t* r, const char* path) {
     }
     kfree(elf);
 
+    current_brk = info.load_end;
+    min_brk     = info.load_end;
+
     r->rip    = info.entry;
-    r->rsp    = (uint64_t)spawn_stack_mem + SPAWN_STACK_SIZE;
+    r->rsp    = (uint64_t)spawn_stack_mem[d] + SPAWN_STACK_SIZE;
     r->cs     = USER_CS;
     r->ss     = USER_DS;
     r->rflags = 0x202;
@@ -424,29 +477,6 @@ static void sys_reboot(void) {
     for (;;) __asm__ volatile ("cli; hlt");
 }
 
-static int sys_write_file(const char* path, const void* buf, uint32_t len) {
-    if (!path || !*path) return -1;
-
-    uint32_t dir;
-    char name[32];
-    if (split_path_cwd(path, &dir, name) < 0) return -1;
-
-    uint32_t ino;
-    uint8_t  type;
-    int exists = (hexfs_lookup(dir, name, &ino, &type) == 0);
-
-    if (exists) {
-        if (type != HEXFS_TYPE_FILE) return -1;
-        int r = hexfs_write(dir, name, buf, len);
-        return r < 0 ? r : (int)len;
-    }
-
-    int r = hexfs_create(dir, name);
-    if (r < 0) return r;
-    r = hexfs_write(dir, name, buf, len);
-    return r < 0 ? r : (int)len;
-}
-
 typedef struct {
     uint8_t* buf;
     uint32_t max;
@@ -508,6 +538,16 @@ static int sys_checkout(const char* path, uint32_t version) {
     return r < 0 ? r : 0;
 }
 
+static int sys_gc(const char* path, uint32_t keep_n) {
+    if (!path || !*path) return -1;
+
+    uint32_t ino;
+    if (hexfs_resolve(sc_cwd, path, &ino) < 0) return -1;
+    if (hexfs_type(ino) != HEXFS_TYPE_FILE) return -1;
+
+    return hexfs_gc(ino, keep_n);
+}
+
 void syscall_dispatch(regs_t* r) {
     uint64_t num = r->rax;
     uint64_t a1  = r->rdi;
@@ -525,18 +565,16 @@ void syscall_dispatch(regs_t* r) {
 
             syscall_reset_fds();
 
-            serial_write("[exit] top-level exit. exit_kernel_rip=");
-            serial_hex_u64(exit_kernel_rip);
-            serial_write(" exit_kernel_rsp=");
-            serial_hex_u64(exit_kernel_rsp);
-            serial_write("\n");
-
             if (exit_kernel_rip == 0) {
-                console_write("\n[exit] no kernel return address, halting.\n",
-                              40);
+                console_write("\n[exit] top-level user program exited.\n", 37);
+                console_write("[exit] No kernel continuation. Halting.\n", 38);
                 serial_write("[exit] no continuation, halting\n");
                 for (;;) __asm__ volatile ("cli; hlt");
             }
+
+            serial_write("[exit] returning to kernel at ");
+            serial_hex_u64(exit_kernel_rip);
+            serial_write("\n");
 
             r->rip     = exit_kernel_rip;
             r->rsp     = exit_kernel_rsp;
@@ -610,22 +648,34 @@ void syscall_dispatch(regs_t* r) {
         case 15:
             r->rax = (uint64_t)sys_format();
             break;
+
+        case 16:
+            console_clear();
+            r->rax = 0;
+            break;
+
+        case 17:
+            r->rax = (uint64_t)sys_write_file((const char*)a1,
+                                              (const void*)a2,
+                                              (uint32_t)a3);
+            break;
+
         case 18:
             r->rax = (uint64_t)sys_log_versions((const char*)a1,
                                                 (void*)a2,
                                                 (uint32_t)a3);
             break;
+
         case 19:
             r->rax = (uint64_t)sys_checkout((const char*)a1, (uint32_t)a2);
             break;
-        case 16:
-            console_clear();
-            r->rax = 0;
+
+        case 20:
+            r->rax = sys_brk(a1);
             break;
-        case 17:
-            r->rax = (uint64_t)sys_write_file((const char*)a1,
-                                              (const void*)a2,
-                                              (uint32_t)a3);
+
+        case 21:
+            r->rax = (uint64_t)sys_gc((const char*)a1, (uint32_t)a2);
             break;
 
         default:

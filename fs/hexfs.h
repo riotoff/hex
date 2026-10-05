@@ -64,6 +64,10 @@ int hexfs_read_version  (uint32_t ino, uint32_t version,
                          void* buf, uint32_t max, uint32_t* out_read);
 int hexfs_version_stat(uint32_t ino, uint32_t version, uint32_t* out_size);
 
+int      hexfs_gc(uint32_t ino, uint32_t keep_n);
+uint32_t hexfs_version_blocks_used(void);
+uint32_t hexfs_version_blocks_total(void);
+
 #define HEXFS_ROOT       1
 #define HEXFS_TYPE_FILE  1
 #define HEXFS_TYPE_DIR   2

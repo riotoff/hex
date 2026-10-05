@@ -589,6 +589,11 @@ static void cmd_diskinfo(void) {
     } else {
         print("no\n");
     }
+    print("Ver tbl: ");
+    print_uint(hexfs_version_blocks_used());
+    print(" / ");
+    print_uint(hexfs_version_blocks_total());
+    print(" blocks\n");
 }
 
 static void cmd_diskread(const char* args) {
@@ -874,6 +879,8 @@ static void cmd_run(void) {
         return;
     }
 
+    syscall_reset_fds();
+    syscall_set_brk(info.load_end);
     um_enter(info.entry, (uint64_t)stack_page + 4096);
 
     free_page(stack_page);
@@ -953,8 +960,9 @@ static void cmd_exec(const char* path) {
     }
 
     syscall_reset_fds();
+    syscall_set_brk(info.load_end);
     um_enter(info.entry, (uint64_t)stack_page + 4096);
-
+    
     free_page(stack_page);
     kfree(buf);
 }

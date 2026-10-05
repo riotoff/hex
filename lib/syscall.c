@@ -99,22 +99,6 @@ int hex_format(void) {
     return (int)sys3(SYS_FORMAT, 0, 0, 0);
 }
 
-int hex_list_versions(const char* path, void* buf, size_t max) {
-    return (int)sys3(18, (long)path, (long)buf, (long)max);
-}
-
-int hex_checkout(const char* path, int version) {
-    return (int)sys3(19, (long)path, (long)version, 0);
-}
-
-int hex_clear(void) {
-    return (int)sys3(16, 0, 0, 0);
-}
-
-int hex_write_file(const char* path, const void* buf, size_t len) {
-    return (int)sys3(17, (long)path, (long)buf, (long)len);
-}
-
 void hex_reboot(void) {
     sys3(SYS_REBOOT, 0, 0, 0);
     for (;;) { }
@@ -127,4 +111,30 @@ void _exit(int code) {
 
 void exit(int code) {
     _exit(code);
+}
+
+int hex_clear(void) {
+    return (int)sys3(16, 0, 0, 0);
+}
+
+int hex_write_file(const char* path, const void* buf, size_t len) {
+    return (int)sys3(17, (long)path, (long)buf, (long)len);
+}
+
+int hex_list_versions(const char* path, void* buf, size_t max) {
+    return (int)sys3(18, (long)path, (long)buf, (long)max);
+}
+
+int hex_checkout(const char* path, int version) {
+    return (int)sys3(19, (long)path, (long)version, 0);
+}
+
+int hex_gc(const char* path, int keep_n) {
+    return (int)sys3(21, (long)path, (long)keep_n, 0);
+}
+
+void* __hex_brk(void* addr) {
+    long r = sys3(20, (long)addr, 0, 0);
+    if (r < 0) return (void*)-1;
+    return (void*)r;
 }

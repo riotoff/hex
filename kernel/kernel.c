@@ -37,6 +37,8 @@ extern const uint8_t _binary_user_init_elf_start[];
 extern const uint8_t _binary_user_init_elf_end[];
 extern const uint8_t _binary_user_hexinstall_elf_start[];
 extern const uint8_t _binary_user_hexinstall_elf_end[];
+extern const uint8_t _binary_user_hsl_elf_start[];
+extern const uint8_t _binary_user_hsl_elf_end[];
 
 static void putchar(char c) { console_putchar(c); }
 
@@ -1581,6 +1583,9 @@ static void install_bins(void) {
     install_binary("hexinstall",
                    _binary_user_hexinstall_elf_start,
                    _binary_user_hexinstall_elf_end);
+    install_binary("hsl",
+                   _binary_user_hsl_elf_start,
+                   _binary_user_hsl_elf_end);
 }
 
 static void exec(const char* buf, int len) {

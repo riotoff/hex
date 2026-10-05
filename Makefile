@@ -48,6 +48,7 @@ KERNEL_OBJS = \
     user/hello_bin.o \
     user/shell_bin.o \
     user/init_bin.o \
+    user/hsl_bin.o \
     user/hexinstall_bin.o
 
 all: os.img
@@ -113,6 +114,12 @@ user/init.elf: user/init.c lib/start.o lib/libhexc.a user.ld
 	$(CC) $(USER_CFLAGS) -T user.ld -o $@ user/init.c \
 	    lib/start.o lib/libhexc.a
 
+user/hsl.elf: user/hsl.c lib/start.o lib/libhexc.a user.ld
+	$(CC) $(USER_CFLAGS) -T user.ld -o $@ user/hsl.c \
+	    lib/start.o lib/libhexc.a
+
+user/hsl_bin.o: user/hsl.elf
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 $< $@
 
 user/hello_bin.o: user/hello.elf
 	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 $< $@
